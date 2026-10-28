@@ -1,0 +1,137 @@
+<?xml version="1.0"?>
+<robot name="four_dof_arm">
+
+  <!-- Dimensions are in metres, as required by URDF:
+       shoulder height = 0.071532 m
+       shoulder-to-elbow = 0.200 m
+       elbow-to-wrist = 0.175 m
+       wrist-to-claw-tip = 0.050 m -->
+
+  <material name="base_gray">
+    <color rgba="0.35 0.38 0.42 1"/>
+  </material>
+  <material name="arm_blue">
+    <color rgba="0.12 0.38 0.85 1"/>
+  </material>
+  <material name="forearm_orange">
+    <color rgba="0.95 0.42 0.12 1"/>
+  </material>
+  <material name="wrist_gray">
+    <color rgba="0.65 0.68 0.72 1"/>
+  </material>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.055" length="0.030"/></geometry>
+      <material name="base_gray"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.055" length="0.030"/></geometry>
+    </collision>
+  </link>
+
+  <link name="rotating_base">
+    <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.050"/></geometry>
+      <material name="base_gray"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.050"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="base_yaw_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="rotating_base"/>
+    <origin xyz="0 0 0.030" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14159" upper="3.14159" effort="10" velocity="2.0"/>
+  </joint>
+
+  <link name="upper_arm">
+    <visual>
+      <origin xyz="0.100 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.200 0.025 0.025"/></geometry>
+      <material name="arm_blue"/>
+    </visual>
+    <collision>
+      <origin xyz="0.100 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.200 0.025 0.025"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="shoulder_pitch_joint" type="revolute">
+    <parent link="rotating_base"/>
+    <child link="upper_arm"/>
+    <!-- Joint pivot is 71.532 mm above ground. The rotating base joint
+         is at z=30 mm, so this joint origin is 41.532 mm above it. -->
+    <origin xyz="0 0 0.041532" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.8" upper="2.8" effort="10" velocity="2.0"/>
+  </joint>
+
+  <link name="forearm">
+    <visual>
+      <origin xyz="0.0875 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.175 0.020 0.020"/></geometry>
+      <material name="forearm_orange"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0875 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.175 0.020 0.020"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="elbow_pitch_joint" type="revolute">
+    <parent link="upper_arm"/>
+    <child link="forearm"/>
+    <origin xyz="0.200 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.8" upper="2.8" effort="10" velocity="2.0"/>
+  </joint>
+
+  <!-- The origin of wrist_link is exactly the wrist target point. -->
+  <link name="wrist_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.014"/></geometry>
+      <material name="wrist_gray"/>
+    </visual>
+    <collision>
+      <geometry><sphere radius="0.014"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="wrist_pitch_joint" type="revolute">
+    <parent link="forearm"/>
+    <child link="wrist_link"/>
+    <origin xyz="0.175 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.8" upper="2.8" effort="5" velocity="2.5"/>
+  </joint>
+
+  <!-- Simplified 50 mm claw/tool link, extending forward from the wrist.
+       IK for the wrist position should target wrist_link, not claw_link. -->
+  <link name="claw_link">
+    <visual>
+      <origin xyz="0.025 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.050 0.012 0.012"/></geometry>
+      <material name="wrist_gray"/>
+    </visual>
+    <collision>
+      <origin xyz="0.025 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.050 0.012 0.012"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="claw_fixed_joint" type="fixed">
+    <parent link="wrist_link"/>
+    <child link="claw_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+</robot>
