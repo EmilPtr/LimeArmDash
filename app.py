@@ -48,16 +48,7 @@ JOINTS = {
 DEFAULTS = tuple(v[2] for v in JOINTS.values())
 
 
-# Encoder offsets (firmware). NOT applied to the visualizer (both arms are drawn raw); only
-# used for control: IK commands and the claw buttons' resend of the present pose.
-BACKLASH = (0, 5, 15, -5)  # base, shoulder, elbow, wrist (WRIST_SERVO_OFFSET)
 ENC_RANGE = ((135, 270), (0, 120), (75, 180), (90, 270))
-
-
-def wrist_offset(shoulder, elbow):
-    """Empirical pose-dependent offset (fit to measured poses) for the absolute wrist:
-    the claw is level when shoulder + elbow + wrist - 360 = wrist_offset."""
-    return 57.0 - 0.104 * shoulder - 0.38 * elbow
 
 
 def desired_pose(cmd):
@@ -66,11 +57,6 @@ def desired_pose(cmd):
 
 def current_pose(tel):
     return tuple(tel[:4])
-
-
-def tel_to_command(tel):
-    """Telemetry -> the command that reproduces the present pose (wrist is an echo)."""
-    return (tel[0] - BACKLASH[0], tel[1] - BACKLASH[1], tel[2] - BACKLASH[2], tel[3])
 
 
 def driver_to_urdf(base, shoulder, elbow, wrist):
@@ -402,10 +388,8 @@ class App:
         except ValueError:
             pass
         lo, hi = JOINTS["Wrist"][:2]
-        # Empirical fit (4 measured poses, level within ~2 deg): the pose-dependent offset
-        # g replaces the constant backlash terms.  level when shoulder+elbow+wrist-360 = g.
-        g = wrist_offset(shoulder, elbow)
-        return min(hi, max(lo, a + 360.0 + g - shoulder - elbow))
+        # claw pitch above horizontal = shoulder + elbow + wrist - 360
+        return min(hi, max(lo, a + 360.0 - shoulder - elbow))
 
     def wrist_mode_changed(self):
         self.sliders["Wrist"].config(state="disabled" if self.abs_on.get() else "normal")
@@ -415,10 +399,8 @@ class App:
         if self.arm is None:
             self.status.set("Not connected")
             return
-        # resend the arm's present pose (backlash removed) so only the claw changes
-        tel = self.arm.get_joints()[:4]
-        pose = tel_to_command(tel)
-        self.arm.send_frame(*pose, code)
+        # resend the arm's present pose so only the claw changes
+        self.arm.send_frame(*self.arm.get_joints()[:4], code)
         self.status.set("Claw " + ("open" if code == limearm.CLAW_OPEN else "close"))
 
     def show_page(self):
@@ -466,9 +448,7 @@ class App:
         except Exception as e:  # unreachable target, bad number, ...
             self.status.set(f"IK failed: {e}")
             return
-        # The real arm sits at (command - offset), so command the IK angles plus the offsets.
-        ang = [sol["base"], sol["shoulder"] + BACKLASH[1], sol["elbow"] + BACKLASH[2],
-               180.0]  # IK gives no wrist; level unless absolute
+        ang = [sol["base"], sol["shoulder"], sol["elbow"], 180.0]  # IK gives no wrist; level unless absolute
         clamped = []
         for i, (n, (lo, hi, _)) in enumerate(JOINTS.items()):
             if not lo <= ang[i] <= hi:
