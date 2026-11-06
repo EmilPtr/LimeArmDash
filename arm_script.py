@@ -14,6 +14,9 @@ lines are ignored and `#` starts a comment (whole line or end of line).
                                                   <joint> = base|shoulder|elbow|wrist
     claw open                    [timeout=<ms>]
     claw close                   [timeout=<ms>]
+    wrist_abs on <deg>                            absolute wrist pitch ON: <deg> above the
+                                                  horizontal (0 level, 90 upright, -90 down)
+    wrist_abs off                                 absolute wrist pitch OFF
 
 `timeout=<ms>` is optional; DEFAULT_TIMEOUT_MS is used when it is left out.
 Coordinates are in the same frame/units as the dashboard's IK page (mm, +Y
@@ -34,6 +37,16 @@ Semantics
 * `send_frame` always carries all four joints, so the runner remembers the
   last commanded pose and resends it for the joints a command doesn't touch.
   `move` keeps the last commanded wrist angle (IK gives no wrist).
+* Absolute wrist pitch: `wrist_abs on <deg>` / `wrist_abs off` only change runner
+  state (no frame is sent, no waiting; the state starts OFF for every run and is
+  remembered until changed). While ON, every `move` also computes the wrist
+  driver angle that holds the claw at <deg> above horizontal, from the
+  (clamped) shoulder and elbow it is about to send:
+      claw pitch up = shoulder + elbow + wrist - 360      (URDF pitch-joint mapping)
+      wrist = <deg> + 360 - shoulder - elbow              (clamped to wrist limits)
+  and sends it with the rest of the pose. While OFF, `move` leaves the wrist
+  alone. `joint` commands never touch the wrist except `joint wrist` itself,
+  which is an explicit manual override (the next `move` re-applies absolute).
 * Feedback: telemetry base/shoulder/elbow are measured, but wrist and claw only
   echo the last command. So commands with no measured joint (`joint wrist ...`,
   `claw ...`) cannot finish early: they always use their full timeout as a
@@ -72,8 +85,9 @@ class ScriptError(ValueError):
 class Command:
     line: int        # 1-based line number in the file
     text: str        # the source line, comment stripped
-    kind: str        # "move" | "joint" | "claw"
-    args: tuple      # move: (x, y, z); joint: (name, deg); claw: ("open"|"close",)
+    kind: str        # "move" | "joint" | "claw" | "wrist_abs"
+    args: tuple      # move: (x, y, z); joint: (name, deg); claw: ("open"|"close",);
+                     # wrist_abs: (True, deg) or (False,)
     timeout_ms: int
 
 
@@ -123,8 +137,20 @@ def _parse_line(n, line):
         if len(args) != 1 or args[0].lower() not in ("open", "close"):
             raise ValueError("expected: claw open|close [timeout=<ms>]")
         parsed = (args[0].lower(),)
+    elif op == "wrist_abs":
+        usage = "expected: wrist_abs on <degrees above horizontal, -90..90>  |  wrist_abs off"
+        state = args[0].lower() if args else ""
+        if state == "off" and len(args) == 1:
+            parsed = (False,)
+        elif state == "on" and len(args) == 2:
+            deg = _number(args[1], "angle")
+            if not -90.0 <= deg <= 90.0:
+                raise ValueError(f"absolute wrist angle must be within -90..90, got '{args[1]}'")
+            parsed = (True, deg)
+        else:
+            raise ValueError(usage)
     else:
-        raise ValueError(f"unknown command '{words[0]}' (expected move, joint or claw)")
+        raise ValueError(f"unknown command '{words[0]}' (expected move, joint, claw or wrist_abs)")
     return Command(n, line, op, parsed, timeout)
 
 
@@ -187,6 +213,7 @@ class ScriptRunner:
         self.clock, self.sleep = clock, sleep
         self.tolerance, self.poll_s = tolerance, poll_s
         self.pose = None  # last commanded (base, shoulder, elbow, wrist)
+        self.wrist_abs = None  # None = off, else claw pitch in degrees above horizontal
         self._stop = threading.Event()
         self._thread = None
 
@@ -235,6 +262,7 @@ class ScriptRunner:
     def _run(self, commands):
         # Start from where the arm is (base/shoulder/elbow measured, wrist = last command).
         self.pose, _ = self._clamp(self.arm.get_joints()[:4])
+        self.wrist_abs = None
         for cmd in commands:
             if self._stop.is_set():
                 break
@@ -261,8 +289,18 @@ class ScriptRunner:
         except Exception:
             pass
 
+    def _wrist_for(self, shoulder, elbow):
+        """Wrist driver angle holding the claw at self.wrist_abs degrees above horizontal."""
+        return self.wrist_abs + 360.0 - shoulder - elbow
+
     def _execute(self, cmd):
         claw = CLAW_HOLD
+        if cmd.kind == "wrist_abs":
+            self.wrist_abs = cmd.args[1] if cmd.args[0] else None
+            self._emit(cmd.line, cmd.text, "done",
+                       f"absolute wrist {self.wrist_abs:.1f} deg above horizontal"
+                       if self.wrist_abs is not None else "absolute wrist off", self.pose)
+            return
         if cmd.kind == "move":
             try:
                 sol = self.ik(*cmd.args)
@@ -270,6 +308,10 @@ class ScriptRunner:
                 self._emit(cmd.line, cmd.text, "error", f"IK failed: {e}", self.pose)
                 return
             target = (sol["base"], sol["shoulder"], sol["elbow"], self.pose[3])
+            if self.wrist_abs is not None:
+                # use the shoulder/elbow that will really be sent (after clamping)
+                (_, sh, el, _), _ = self._clamp(target)
+                target = (*target[:3], self._wrist_for(sh, el))
             check = MEASURED_JOINTS
         elif cmd.kind == "joint":
             i = JOINT_NAMES.index(cmd.args[0])
