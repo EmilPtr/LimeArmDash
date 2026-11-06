@@ -1,0 +1,25 @@
+# LimeArm example script - one command per line, run top to bottom.
+#
+#   move <x_mm> <y_mm> <z_mm>   [timeout=<ms>]   whole arm to a wrist point (IK)
+#   joint <base|shoulder|elbow|wrist> <deg> [timeout=<ms>]
+#   claw open|close             [timeout=<ms>]
+#
+# A command finishes early once every measured joint is within
+# ACCEPTABLE_ERROR_DEG (arm_script.py) of its target; otherwise it gives up
+# after its timeout and the script carries on. Wrist and claw have no real
+# feedback, so those commands always wait their full timeout.
+
+claw open timeout=800
+
+move 0 250 100 timeout=4000        # in front of the arm
+joint wrist 200 timeout=600        # pitch the claw
+claw close timeout=1000            # grab
+
+move 0 200 200 timeout=4000        # lift
+move 150 200 120 timeout=4000      # swing to the side
+claw open timeout=800              # release
+
+joint wrist 180 timeout=600
+joint shoulder 0 timeout=4000      # back towards the default pose
+joint elbow 180 timeout=4000
+joint base 180                     # no timeout given: DEFAULT_TIMEOUT_MS
