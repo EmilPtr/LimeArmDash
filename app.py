@@ -339,6 +339,9 @@ class App:
             tk.Label(f, text=f"{lo}-{hi}°", bg=GREY, fg=DARK, font=FONT).grid(row=r, column=3, padx=4)
             self.sliders[name], self.jvars[name] = s, var
         btn(f, "Send", self.send_joints).grid(row=len(JOINTS), column=1, pady=6, sticky="e")
+        self.fk_text = tk.StringVar()
+        tk.Label(f, textvariable=self.fk_text, bg=GREY, fg=DARK, font=FONT, anchor="w").grid(
+            row=len(JOINTS) + 1, column=0, columnspan=4, padx=8, pady=(0, 6), sticky="w")
 
     def build_ik_page(self):
         f = self.ik_page = tk.Frame(self.pagebox, bg=GREY)
@@ -351,7 +354,10 @@ class App:
             self.xyz[ax] = var
         btn(f, "Solve IK && Send", self.send_ik).grid(row=0, column=6, padx=16)
         tk.Label(f, text="Target = wrist point.  +Y front, +Z up.", bg=GREY, fg=DARK,
-                 font=FONT).grid(row=1, column=0, columnspan=7, pady=(0, 6))
+                 font=FONT).grid(row=1, column=0, columnspan=7, pady=(0, 2))
+        self.angles_text = tk.StringVar()
+        tk.Label(f, textvariable=self.angles_text, bg=GREY, fg=DARK, font=FONT).grid(
+            row=2, column=0, columnspan=7, pady=(0, 6))
 
     def build_tool_bar(self):
         f = tk.Frame(self.root, bg=GREY, relief="raised", bd=2)
@@ -478,11 +484,21 @@ class App:
         self.status.set(f"Connected to {self.port.get()}")
 
     # ---- redraw loop ----
+    def update_readouts(self):
+        """Joint page: wrist pivot position (forward kinematics) of the desired pose.
+        IK page: the desired joint angles (after a solve, the IK solution)."""
+        pose = desired_pose(self.desired)
+        x, y, z = self.viz.urdf.fk(driver_to_urdf(*pose))["wrist_link"][:3, 3] * 1000.0
+        self.fk_text.set(f"Wrist pivot (FK):  X {x:.1f}   Y {y:.1f}   Z {z:.1f}  mm")
+        self.angles_text.set("Joint angles:  " + "   ".join(
+            f"{n} {a:.1f}°" for n, a in zip(JOINTS, pose)))
+
     def tick(self):
         cur = self.arm.get_joints()[:4] if self.arm else \
             DEFAULTS
         state = (tuple(cur), tuple(self.desired))
         if state != self.last_drawn:
+            self.update_readouts()
             self.viz.draw(cur, self.desired)
             self.last_drawn = state
         self.root.after(100, self.tick)
