@@ -7,9 +7,11 @@ frame, in mm.
 import importlib.util
 import math
 import os
+import queue
 import sys
 import xml.etree.ElementTree as ET
 import tkinter as tk
+from tkinter import filedialog
 
 import numpy as np
 
@@ -17,6 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(HERE)  # ik.py loads "arm.urdf" relative to cwd
 URDF = os.path.join(HERE, "arm.urdf")
 
+import arm_script  # noqa: E402
 import ik  # noqa: E402  (needs HERE on sys.path; it is, as the script dir)
 
 # serial.py in this folder shadows pyserial: load it under another name with
@@ -268,6 +271,8 @@ class App:
         self.arm = None
         self.desired = DEFAULTS
         self.last_drawn = None
+        self.runner = None  # arm_script.ScriptRunner while/after a script runs
+        self.script_events = queue.Queue()  # runner thread -> GUI thread
         root.title("LimeArm Dashboard")
         root.configure(bg=GREY, bd=3, relief="raised")
         root.geometry("900x860")
@@ -293,7 +298,7 @@ class App:
         tabs = tk.Frame(root, bg=GREY)
         tabs.pack(fill="x", padx=6, pady=(8, 0))
         self.page = tk.StringVar(value="joints")
-        for text, val in (("Joint Control", "joints"), ("Inverse Kinematics", "ik")):
+        for text, val in (("Joint Control", "joints"), ("Inverse Kinematics", "ik"), ("Script", "script")):
             tk.Radiobutton(tabs, text=text, variable=self.page, value=val, indicatoron=False,
                            command=self.show_page, bg=GREY, selectcolor=WHITE, activebackground=GREY,
                            relief="raised", bd=2, font=FONT, padx=12, pady=3,
@@ -304,6 +309,7 @@ class App:
         self.pagebox.pack(fill="x", padx=6)
         self.build_joint_page()
         self.build_ik_page()
+        self.build_script_page()
         self.build_tool_bar()
 
         # status bar (packed before visualizer so it keeps its space)
@@ -359,6 +365,19 @@ class App:
         tk.Label(f, textvariable=self.angles_text, bg=GREY, fg=DARK, font=FONT).grid(
             row=2, column=0, columnspan=7, pady=(0, 6))
 
+    def build_script_page(self):
+        f = self.script_page = tk.Frame(self.pagebox, bg=GREY)
+        self.script_path = tk.StringVar(value=os.path.join(HERE, "scripts", "example.txt"))
+        tk.Label(f, text="File:", bg=GREY, font=FONT).grid(row=0, column=0, padx=(6, 2), pady=6)
+        entry(f, self.script_path, 62).grid(row=0, column=1, padx=2, sticky="we")
+        btn(f, "Browse...", self.browse_script).grid(row=0, column=2, padx=2)
+        btn(f, "Run", self.run_script).grid(row=0, column=3, padx=2)
+        btn(f, "Stop", self.stop_script).grid(row=0, column=4, padx=(2, 6))
+        self.script_log = tk.Listbox(f, height=6, bg=WHITE, relief="sunken", bd=2, font=FONT,
+                                     highlightthickness=0, activestyle="none")
+        self.script_log.grid(row=1, column=0, columnspan=5, padx=6, pady=(0, 6), sticky="we")
+        f.columnconfigure(1, weight=1)
+
     def build_tool_bar(self):
         f = tk.Frame(self.root, bg=GREY, relief="raised", bd=2)
         f.pack(fill="x", padx=6, pady=(4, 0))
@@ -402,6 +421,8 @@ class App:
         self.desired = self.slider_values()
 
     def claw(self, code):
+        if self.script_busy():
+            return
         if self.arm is None:
             self.status.set("Not connected")
             return
@@ -410,9 +431,10 @@ class App:
         self.status.set("Claw " + ("open" if code == limearm.CLAW_OPEN else "close"))
 
     def show_page(self):
-        self.joint_page.pack_forget()
-        self.ik_page.pack_forget()
-        (self.joint_page if self.page.get() == "joints" else self.ik_page).pack(fill="x")
+        pages = {"joints": self.joint_page, "ik": self.ik_page, "script": self.script_page}
+        for p in pages.values():
+            p.pack_forget()
+        pages[self.page.get()].pack(fill="x")
 
     # ---- joint page handlers ----
     def slider_moved(self, name):
@@ -434,6 +456,8 @@ class App:
         return (b, sh, el, w)
 
     def send(self, angles):
+        if self.script_busy():
+            return
         self.desired = tuple(angles)
         if self.arm is None:
             self.status.set("Not connected - showing desired pose only")
@@ -467,9 +491,67 @@ class App:
         if clamped:
             self.status.set(self.status.get() + "  (clamped: " + ", ".join(clamped) + ")")
 
+    # ---- script page ----
+    def script_busy(self):
+        if self.runner and self.runner.running:
+            self.status.set("Script running - press Stop on the Script page first")
+            return True
+        return False
+
+    def browse_script(self):
+        path = filedialog.askopenfilename(initialdir=os.path.join(HERE, "scripts"), title="Open arm script",
+                                          filetypes=(("Text", "*.txt"), ("All files", "*")))
+        if path:
+            self.script_path.set(path)
+
+    def script_log_line(self, text):
+        self.script_log.insert("end", text)
+        self.script_log.see("end")
+
+    def run_script(self):
+        if self.runner and self.runner.running:
+            self.status.set("Script already running")
+            return
+        if self.arm is None:
+            self.status.set("Not connected - connect before running a script")
+            return
+        self.script_log.delete(0, "end")
+        try:  # parse the whole file before anything moves
+            cmds = arm_script.load_script(self.script_path.get())
+        except arm_script.ScriptError as e:
+            for err in e.errors:
+                self.script_log_line(err)
+            self.status.set(f"Script not run: {len(e.errors)} syntax error(s)")
+            return
+        except OSError as e:
+            self.status.set(f"Can't open script: {e}")
+            return
+        limits = {n.lower(): (lo, hi) for n, (lo, hi, _) in JOINTS.items()}
+        self.runner = arm_script.ScriptRunner(self.arm, ik.inverse_kinematics, limits,
+                                              on_event=self.script_events.put)
+        self.runner.start(cmds)
+        self.status.set(f"Running script: {len(cmds)} command(s)")
+
+    def stop_script(self):
+        if self.runner and self.runner.running:
+            self.runner.stop()
+            self.status.set("Stopping script...")
+
+    def script_event(self, ev):
+        if ev.pose:
+            self.desired = ev.pose
+        where = f"line {ev.line}: {ev.text}  " if ev.line else ""
+        msg = f"{where}[{ev.status}] {ev.message}".rstrip()
+        if ev.status != "running" or ev.message:  # "running" is shown in the status bar only
+            self.script_log_line(msg)
+        self.status.set("Script " + msg)
+
     # ---- serial ----
     def toggle_connect(self):
         if self.arm:
+            if self.runner and self.runner.running:
+                self.runner.stop()
+                self.runner.join(1)
             self.arm.close()
             self.arm = None
             self.conn_btn.config(text="Connect")
@@ -494,6 +576,11 @@ class App:
             f"{n} {a:.1f}°" for n, a in zip(JOINTS, pose)))
 
     def tick(self):
+        while True:  # script progress arrives from the runner thread
+            try:
+                self.script_event(self.script_events.get_nowait())
+            except queue.Empty:
+                break
         cur = self.arm.get_joints()[:4] if self.arm else \
             DEFAULTS
         state = (tuple(cur), tuple(self.desired))
